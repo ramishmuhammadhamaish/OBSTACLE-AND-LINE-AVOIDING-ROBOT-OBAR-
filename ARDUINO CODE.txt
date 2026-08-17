@@ -1,0 +1,248 @@
+#include <Servo.h>          //Servo motor library. This is standard library
+#include <NewPing.h>        //Ultrasonic sensor function library. You must install this library
+
+//our L298N control pins
+const int LeftMotorForward = 7;
+const int LeftMotorBackward = 6;
+const int RightMotorForward = 5;
+const int RightMotorBackward = 4;
+
+//L298N enable pins (speed control via PWM)
+const int ENA = 9;  // Right motor speed
+const int ENB = 3;  // Left motor speed
+const int MOTOR_SPEED = 160; // 0-255, lower = slower
+
+//sensor pins
+#define trig_pin A1 //analog input 1
+#define echo_pin A2 //analog input 2
+#define maximum_distance 200
+
+// IR line sensor pins
+const int RightIR = 12;
+const int LeftIR  = 11;
+// LM393-based sensor: tested as active-low on the sensor's own OUT pin,
+// which means it reads HIGH when a black line is detected in this setup.
+const int LINE_DETECTED_STATE = HIGH;
+
+//===== TUNE THESE VALUES FOR YOUR ROBOT =====
+const int TURN_DURATION = 600;   // ms - how long the pivot lasts. Increase if turn is too small, decrease if it overshoots.
+const int SERVO_CENTER  = 115;   // straight ahead
+const int SERVO_RIGHT   = 50;    // full right look angle
+const int SERVO_LEFT    = 170;   // full left look angle - reduce (e.g. 160) if servo strains/hits something at 170
+const int OBSTACLE_DISTANCE = 40; // cm - distance at which robot reacts (try 45 if it's still too close)
+const int STUCK_LIMIT = 3;        // how many avoidance attempts in a row before triggering escape maneuver
+const int ESCAPE_TURN_DURATION = 1300; // ms - bigger turn used to break out of tight spots (doorways/corners)
+const unsigned long PING_INTERVAL = 100; // ms between ultrasonic checks - line sensors are checked every loop regardless
+//=============================================
+
+boolean goesForward = false;
+int distance = 100;
+int avoidanceCount = 0; // tracks consecutive avoidance triggers without a clean forward run
+unsigned long lastPingTime = 0;
+
+NewPing sonar(trig_pin, echo_pin, maximum_distance); //sensor function
+Servo servo_motor; //our servo name
+
+void setup(){
+  pinMode(RightMotorForward, OUTPUT);
+  pinMode(LeftMotorForward, OUTPUT);
+  pinMode(LeftMotorBackward, OUTPUT);
+  pinMode(RightMotorBackward, OUTPUT);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  analogWrite(ENA, MOTOR_SPEED);
+  analogWrite(ENB, MOTOR_SPEED);
+
+  pinMode(RightIR, INPUT);
+  pinMode(LeftIR, INPUT);
+
+  servo_motor.attach(10); //our servo pin
+  servo_motor.write(SERVO_CENTER);
+  delay(2000);
+
+  distance = readPing();
+}
+
+void loop(){
+  // Check line sensors on every single pass - no blocking delay, near-instant reaction
+  bool lineDetected = checkLineSensors();
+
+  // Ultrasonic only needs to refresh periodically, not every loop - handled via millis() instead of delay()
+  if (millis() - lastPingTime >= PING_INTERVAL){
+    distance = readPing();
+    lastPingTime = millis();
+  }
+
+  bool obstacleAhead = (distance <= OBSTACLE_DISTANCE);
+
+  if (obstacleAhead || lineDetected){
+    avoidanceCount++; // another avoidance trigger - are we stuck in a loop?
+    avoidRoutine();
+  }
+  else{
+    moveForward();
+    avoidanceCount = 0; // clean forward drive - reset the stuck counter
+  }
+}
+
+// Returns true if either IR sensor currently detects a black line underneath
+bool checkLineSensors(){
+  int rightVal = digitalRead(RightIR);
+  int leftVal  = digitalRead(LeftIR);
+  return (rightVal == LINE_DETECTED_STATE || leftVal == LINE_DETECTED_STATE);
+}
+
+// Shared avoidance sequence - used for both ultrasonic obstacles and line detection
+void avoidRoutine(){
+  int distanceRight = 0;
+  int distanceLeft = 0;
+
+  moveStop();
+  delay(300);
+
+  moveBackward();
+  delay(400);
+  moveStop();
+  delay(300);
+
+  if (avoidanceCount >= STUCK_LIMIT){
+    // Normal turn isn't working (likely a doorway/corner trap) - do a bigger escape move
+    moveBackward();
+    delay(500); // back up further to get clear of the tight spot
+    moveStop();
+    delay(200);
+
+    randomSeed(millis()); // vary the outcome so it doesn't repeat the exact same failed path
+    if (random(0, 2) == 0){
+      turnRightEscape();
+    }
+    else{
+      turnLeftEscape();
+    }
+
+    avoidanceCount = 0; // reset after escape attempt
+  }
+  else{
+    distanceRight = lookRight();
+    delay(300);
+    distanceLeft = lookLeft();
+    delay(300);
+
+    // Compare actual left vs right space, turn toward whichever side is more open
+    if (distanceRight >= distanceLeft){
+      turnRight();
+    }
+    else{
+      turnLeft();
+    }
+  }
+
+  distance = readPing(); // refresh distance right after the maneuver
+  lastPingTime = millis();
+}
+
+int lookRight(){
+  servo_motor.write(SERVO_RIGHT);
+  delay(500);
+  int distance = readPing();
+  delay(100);
+  servo_motor.write(SERVO_CENTER);
+  delay(300); // let servo return to center before next reading
+  return distance;
+}
+
+int lookLeft(){
+  servo_motor.write(SERVO_LEFT);
+  delay(500);
+  int distance = readPing();
+  delay(100);
+  servo_motor.write(SERVO_CENTER);
+  delay(300); // let servo return to center before next reading
+  return distance;
+}
+
+int readPing(){
+  int cm = sonar.ping_cm();
+  if (cm==0){
+    cm=250;
+  }
+  return cm;
+}
+
+void moveStop(){
+  digitalWrite(RightMotorForward, LOW);
+  digitalWrite(LeftMotorForward, LOW);
+  digitalWrite(RightMotorBackward, LOW);
+  digitalWrite(LeftMotorBackward, LOW);
+  goesForward = false;
+}
+
+void moveForward(){
+  if(!goesForward){
+    goesForward=true;
+
+    digitalWrite(LeftMotorForward, HIGH);
+    digitalWrite(RightMotorForward, HIGH);
+
+    digitalWrite(LeftMotorBackward, LOW);
+    digitalWrite(RightMotorBackward, LOW);
+  }
+}
+
+void moveBackward(){
+  goesForward=false;
+  digitalWrite(LeftMotorBackward, HIGH);
+  digitalWrite(RightMotorBackward, HIGH);
+
+  digitalWrite(LeftMotorForward, LOW);
+  digitalWrite(RightMotorForward, LOW);
+}
+
+void turnRight(){
+  digitalWrite(LeftMotorForward, HIGH);
+  digitalWrite(RightMotorBackward, HIGH);
+
+  digitalWrite(LeftMotorBackward, LOW);
+  digitalWrite(RightMotorForward, LOW);
+
+  delay(TURN_DURATION); // pivot duration - tune this at the top of the file
+
+  moveStop(); // stop cleanly after the turn instead of drifting forward
+}
+
+void turnLeft(){
+  digitalWrite(LeftMotorBackward, HIGH);
+  digitalWrite(RightMotorForward, HIGH);
+
+  digitalWrite(LeftMotorForward, LOW);
+  digitalWrite(RightMotorBackward, LOW);
+
+  delay(TURN_DURATION); // pivot duration - tune this at the top of the file
+
+  moveStop(); // stop cleanly after the turn instead of drifting forward
+}
+
+void turnRightEscape(){
+  digitalWrite(LeftMotorForward, HIGH);
+  digitalWrite(RightMotorBackward, HIGH);
+
+  digitalWrite(LeftMotorBackward, LOW);
+  digitalWrite(RightMotorForward, LOW);
+
+  delay(ESCAPE_TURN_DURATION); // bigger turn to break out of tight spots
+
+  moveStop();
+}
+
+void turnLeftEscape(){
+  digitalWrite(LeftMotorBackward, HIGH);
+  digitalWrite(RightMotorForward, HIGH);
+
+  digitalWrite(LeftMotorForward, LOW);
+  digitalWrite(RightMotorBackward, LOW);
+
+  delay(ESCAPE_TURN_DURATION); // bigger turn to break out of tight spots
+
+  moveStop();
+}
